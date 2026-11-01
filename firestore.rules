@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ----------------------------------------------------------------------
+    // AUTHENTICATION & AUTHORIZATION HELPERS
+    // ----------------------------------------------------------------------
+
+    // Check if user is signed in
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user's email is verified through Firebase Authentication
+    function isEmailVerified() {
+      return isAuthenticated() && request.auth.token.email_verified == true;
+    }
+
+    // Check if user is an authorized admin (verified ONLY via admins/{uid} document)
+    function isAdmin() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Check if user is an email-verified student with an admin-approved profile
+    function isApprovedStudent() {
+      return isAuthenticated() &&
+        isEmailVerified() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.approvalStatus == 'approved';
+    }
+
+    // ----------------------------------------------------------------------
+    // 1. ADMINS COLLECTION
+    // ----------------------------------------------------------------------
+    match /admins/{adminId} {
+      // Authenticated users can check if a document exists for authorization checks
+      allow read: if isAuthenticated();
+      // Only existing admins can write or create admin records; students CANNOT make themselves admin
+      allow write: if isAdmin();
+    }
+
+    // ----------------------------------------------------------------------
+    // 2. USERS COLLECTION (Student Profiles)
+    // ----------------------------------------------------------------------
+    match /users/{userId} {
+      // Students can read their own profile; admins can read all profiles to manage approvals
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+
+      // Students create their profile upon registration:
+      // Must be their own UID, role must be 'student', approvalStatus must start as 'pending'
+      allow create: if isAuthenticated() &&
+        request.auth.uid == userId &&
+        request.resource.data.role == 'student' &&
+        request.resource.data.approvalStatus == 'pending';
+
+      // Only admins can approve, reject, or modify student accounts
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------------------------
+    // 3. ITEMS COLLECTION (Lost & Found Reports)
+    // ----------------------------------------------------------------------
+    match /items/{itemId} {
+      // Anyone can browse items on the homepage (students and campus visitors)
+      allow read: if true;
+
+      // Only email-verified, admin-approved students or authorized admins can create reports
+      allow create: if (isApprovedStudent() || isAdmin()) &&
+        request.resource.data.reporterUid == request.auth.uid;
+
+      // Only the original reporter or an authorized admin can update report details or status
+      allow update: if isAuthenticated() && (
+        resource.data.reporterUid == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Only the original reporter or an authorized admin can delete a report
+      allow delete: if isAuthenticated() && (
+        resource.data.reporterUid == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // ----------------------------------------------------------------------
+    // 4. CLAIMS COLLECTION (Ownership Verification)
+    // ----------------------------------------------------------------------
+    match /claims/{claimId} {
+      // Claimant, original item reporter, or admin can read the claim
+      allow read: if isAuthenticated() && (
+        resource.data.claimantUid == request.auth.uid ||
+        resource.data.reporterUid == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Only email-verified, admin-approved students or admins can submit claims:
+      // - Must be signed in as claimant
+      // - Cannot claim their own reported item
+      allow create: if (isApprovedStudent() || isAdmin()) &&
+        request.resource.data.claimantUid == request.auth.uid &&
+        request.resource.data.reporterUid != request.auth.uid;
+
+      // Only original item reporter or admin can approve/reject claims
+      allow update: if isAuthenticated() && (
+        resource.data.reporterUid == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------------------------
+    // 5. NOTIFICATIONS COLLECTION
+    // ----------------------------------------------------------------------
+    match /notifications/{notifId} {
+      // Recipient can read their own notifications
+      allow read: if isAuthenticated() && resource.data.recipientUid == request.auth.uid;
+
+      // Recipient can mark their notifications as read
+      allow update: if isAuthenticated() && resource.data.recipientUid == request.auth.uid;
+
+      // Authenticated users and admins can create notifications (for registration updates, claims, etc.)
+      allow create: if isAuthenticated();
+
+      // Recipient can delete notifications
+      allow delete: if isAuthenticated() && resource.data.recipientUid == request.auth.uid;
+    }
+  }
+}
